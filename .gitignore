@@ -1,0 +1,10 @@
+# Ignore everything without an extension
+*
+!*.*
+!*/
+
+# Ignore specific file types
+*.out
+*.o
+*.a
+*.so
