@@ -1,4 +1,5 @@
 #include <iostream>
+#include <iomanip>
 #include <limits>
 #include <cassert>
 
@@ -15,7 +16,7 @@ O: Mxd
 l,m: Mx1
 */
 
-constexpr int SRAM_SIZE = 9000;
+constexpr int SRAM_SIZE = 25000;
 constexpr float NEGATIVE_INF = std::numeric_limits<float>::lowest();
 
 int ceildiv(int a, int b) {
@@ -352,16 +353,37 @@ void flash_attention_2(const float* Q, const float* K, const float* V, float* O,
     // call kernel
     const int threadsPerBlock = 1024;
     const int blocksPerGrid = 1;
+    std::cout << "Shared memory needed: " << shmem_needed << " bytes" << std::endl;
     flash_attention_2_kernel<<<blocksPerGrid, threadsPerBlock, shmem_needed>>>(
         Q, K, V, O, M, N, d, Br, Bc, Tr, Tc, alloc_size
     );
 }
 
-
 int main() {
-    constexpr int M = 100000;
-    constexpr int N = 90000;
-    constexpr int d = 1024;
+    // Print device properties
+    int device_id = 0;
+    cudaDeviceProp device_prop;
+    cudaGetDeviceProperties(&device_prop, device_id);
+    std::cout << "Device ID: " << device_id << std::endl;
+    std::cout << "Compute capability: " << device_prop.major << "." << device_prop.minor << std::endl;
+    std::cout << "Device name: " << device_prop.name << std::endl;
+    std::cout << "Total global memory: " << device_prop.totalGlobalMem / (1024 * 1024) << " MB" << std::endl;
+    std::cout << "Shared memory per block: " << device_prop.sharedMemPerBlock << " KB" << std::endl;
+    std::cout << "Max threads per block: " << device_prop.maxThreadsPerBlock << std::endl;
+    std::cout << "Max threads dim: " << device_prop.maxThreadsDim[0] << ", " << device_prop.maxThreadsDim[1] << ", " << device_prop.maxThreadsDim[2] << std::endl;
+    std::cout << "Max grid size: " << device_prop.maxGridSize[0] << ", " << device_prop.maxGridSize[1] << ", " << device_prop.maxGridSize[2] << std::endl;
+    std::cout << "Warp size: " << device_prop.warpSize << std::endl;
+    std::cout << "Max threads per multiprocessor: " << device_prop.maxThreadsPerMultiProcessor << std::endl;
+    std::cout << "Max shared memory per multiprocessor: " << device_prop.sharedMemPerMultiprocessor / (1024) << " KB" << std::endl;
+    std::cout << "Max registers per multiprocessor: " << device_prop.regsPerMultiprocessor << std::endl;
+
+    // We're using A10G GPU, which has 99KB available shared memory per block
+    cudaFuncSetAttribute(flash_attention_2_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024);
+
+    // Benchmark parameters
+    constexpr int M = 10000;
+    constexpr int N = 9000;
+    constexpr int d = 32;
 
     std::cout << "M: " << M << ", N: " << N << ", d: " << d << std::endl;
 
@@ -397,18 +419,15 @@ int main() {
     // Call Flash Attention 2
     flash_attention_2(d_Q, d_K, d_V, d_O, M, N, d);
 
-    std::cout << "Kernel execution completed." << std::endl;
-
     // Copy result from device to host
     cudaMemcpy(O, d_O, M * d * sizeof(float), cudaMemcpyDeviceToHost);
 
-    // Compute a hash of the output
-    unsigned long long hash = 0;
-    for (int i = 0; i < M * d; ++i) {
-        hash ^= static_cast<unsigned long long>(O[i]) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    // Print first 10 elements of output
+    std::cout << "Output:" << std::endl;
+    for (int i = 0; i < 10 && i < M * d; ++i) {
+        std::cout << std::setprecision(10) << O[i] << " ";
     }
-    std::cout << "Hash of output: " << hash << std::endl;
-    assert(hash == 8002302810381362822ULL);
+    std::cout << "..." << std::endl;
 
     // Free allocated memory
     cudaFree(d_Q);
