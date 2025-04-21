@@ -118,10 +118,10 @@ __device__ void array_fill(
 }
 
 /**
- * Computes matrix multiplication A*BT.
- * A is of size MxK, B is of size NxK.
+ * Computes matrix multiplication A * B.
+ * A is of size MxK, B is of size KxN.
  * Output C is of size MxN.
- * If add_to_output, A*BT is added to C instead of overwriting it.
+ * If add_to_output, A * B is added to C instead of overwriting it.
  * This is a simple version, not optimized for speed.
  */
 template <bool add_to_output = false>
@@ -141,7 +141,7 @@ __device__ void matrix_multiply(
         int n = i % N;
         float sum = 0;
         for (int k = 0; k < K; ++k) {
-            sum += A[m * K + k] * B[n * K + k];
+            sum += A[m * K + k] * B[k * N + n];
         }
         if constexpr (add_to_output) {
             C[i] += sum;
@@ -293,6 +293,11 @@ __global__ void flash_attention_2_kernel(
     const int Tc,
     const int alloc_size
 ) {
+
+    // print running block
+    if (threadIdx.x == 0) {
+        printf("Running block %d of %d\n", blockIdx.x, Tr);
+    }
     extern __shared__ float s[];
     float *Oi = s;
     float *Qi = &s[alloc_size];
@@ -307,41 +312,39 @@ __global__ void flash_attention_2_kernel(
     float* mi_prev = mi; // m(i,j-1)
     float* mi_cur = mi2; // m(i,j)
 
-    for (int i = 0; i < Tr; i++) {
-        int loopBr = min(Br, M - i * Br);
-        matrix_block_load(Qi, Q, M, d, Br, i);
-        array_fill(Oi, 0, loopBr * d);
-        array_fill(li, 0, loopBr);
-        array_fill(mi_prev, NEGATIVE_INF, loopBr);
+    int i = blockIdx.x;
+    int loopBr = min(Br, M - i * Br);
+    matrix_block_load(Qi, Q, M, d, Br, i);
+    array_fill(Oi, 0, loopBr * d);
+    array_fill(li, 0, loopBr);
+    array_fill(mi_prev, NEGATIVE_INF, loopBr);
+    __syncthreads();
+    for (int j = 0; j < Tc; j++) {
+        int loopBc = min(Bc, N - j * Bc);
+        matrix_block_load_transpose(KiVi, K, N, d, Bc, loopBc, j);
         __syncthreads();
-        for (int j = 0; j < Tc; j++) {
-            int loopBc = min(Bc, N - j * Bc);
-            matrix_block_load(KiVi, K, N, d, Bc, j);
-            __syncthreads();
-            matrix_multiply(Qi, KiVi, SiPi, loopBr, loopBc, d);
-            __syncthreads();
-            divide_by_scalar(SiPi, sqrtf(d), loopBr * loopBc);
-            __syncthreads();
-            mi_update(mi_cur, mi_prev, SiPi, loopBr, loopBc);
-            __syncthreads();
-            si_to_pi(SiPi, mi_cur, loopBr, loopBc);
-            __syncthreads();
-            li_update(li, SiPi, mi_prev, mi_cur, loopBr, loopBc);
-            matrix_block_load_transpose(KiVi, V, N, d, Bc, loopBc, j);
-            __syncthreads();
-            Oi_update(Oi, SiPi, KiVi, mi_prev, mi_cur, loopBr, loopBc, d);
-            __syncthreads();
+        matrix_multiply(Qi, KiVi, SiPi, loopBr, loopBc, d);
+        __syncthreads();
+        divide_by_scalar(SiPi, sqrtf(d), loopBr * loopBc);
+        __syncthreads();
+        mi_update(mi_cur, mi_prev, SiPi, loopBr, loopBc);
+        __syncthreads();
+        si_to_pi(SiPi, mi_cur, loopBr, loopBc);
+        __syncthreads();
+        li_update(li, SiPi, mi_prev, mi_cur, loopBr, loopBc);
+        matrix_block_load(KiVi, V, N, d, Bc, j);
+        __syncthreads();
+        Oi_update(Oi, SiPi, KiVi, mi_prev, mi_cur, loopBr, loopBc, d);
+        __syncthreads();
 
-            // swap mi_prev / mi_cur
-            auto tmp = mi_prev;
-            mi_prev = mi_cur;
-            mi_cur = tmp;
-        }
-        Oi_scale(Oi, li, loopBr, d);
-        __syncthreads();
-        matrix_block_store(O, Oi, M, d, Br, i);
-        __syncthreads();
+        // swap mi_prev / mi_cur
+        auto tmp = mi_prev;
+        mi_prev = mi_cur;
+        mi_cur = tmp;
     }
+    Oi_scale(Oi, li, loopBr, d);
+    __syncthreads();
+    matrix_block_store(O, Oi, M, d, Br, i);
 }
 
 // Q, K, V, O are device pointers
@@ -356,7 +359,7 @@ void flash_attention_2(const float* Q, const float* K, const float* V, float* O,
 
     // call kernel
     const int threadsPerBlock = 1024;
-    const int blocksPerGrid = 1;
+    const int blocksPerGrid = Tr;
     std::cout << "Shared memory needed: " << shmem_needed << " bytes" << std::endl;
     flash_attention_2_kernel<<<blocksPerGrid, threadsPerBlock, shmem_needed>>>(
         Q, K, V, O, M, N, d, Br, Bc, Tr, Tc, alloc_size
@@ -384,7 +387,6 @@ int main() {
 
     // We're using A10G GPU, which has 99KB available shared memory per block
     cudaFuncSetAttribute(flash_attention_2_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, A10G_SRAM_SIZE);
-    // cudaFuncSetCacheConfig(flash_attention_2_kernel, cudaFuncCachePreferShared);
 
     // Benchmark parameters
     constexpr int M = 10000;

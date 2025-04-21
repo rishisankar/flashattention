@@ -1,3 +1,13 @@
 # flashattention
 
 Implementations of [Flash Attention 2](https://arxiv.org/abs/2307.08691) in CUDA. Tested on a Nvidia A10G GPU on an Amazon EC2 g5.xlarge instance.
+
+
+### Nsight Compute notes
+
+Single head attention (using M = 10000, N = 9000, d = 32)
+| Version | Optimization | Code | Duration | Compute Throughput % | Memory Throughput % | Notes |
+| - | - | - | - | - | - | - |
+| V1 | Baseline | [Link](./fa2_single_head_single_block.cu) | 2.78s | 0.27% | 1.19% | Estimated speedup 98.75% since only 1 of 80 SMs being used
+| V2 | Parallelized work over multiple thread blocks | [Link](./fa2_single_head_multi_block.cu) | 38.53ms | 19.54% | 86.04% | Uncoalesced shared accesses est speedup 86.73%, shared load bank conflicts est speedup 78.20%, L1TEX local store access pattern est speedup 74.97%. Matrix multiplication is primary memory overhead.
+| V3 | Matrix multiplication multiplies (A @ B) instead of (A @ B.T) | [Link](./fa2_single_head_multi_block_opt1.cu) | 12.03ms | 63.35% | 63.35% | L1TEX local store access pattern est speedup 55.43%; Memory I/O causing warp stalls.
