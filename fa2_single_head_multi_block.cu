@@ -293,11 +293,6 @@ __global__ void flash_attention_2_kernel(
     const int Tc,
     const int alloc_size
 ) {
-
-    // print running block
-    if (threadIdx.x == 0) {
-        printf("Running block %d of %d\n", blockIdx.x, Tr);
-    }
     extern __shared__ float s[];
     float *Oi = s;
     float *Qi = &s[alloc_size];

@@ -118,11 +118,16 @@ __device__ void array_fill(
 }
 
 /**
- * Computes matrix multiplication A * B.
+ * Computes matrix multiplication A*B.
  * A is of size MxK, B is of size KxN.
  * Output C is of size MxN.
- * If add_to_output, A * B is added to C instead of overwriting it.
- * This is a simple version, not optimized for speed.
+ * If add_to_output, A*B is added to C instead of overwriting it.
+ * A, B, C are in shared memory. This assumes a single
+ * block of 1024 threads, and 32 threads per warp.
+ * Implements 2d blocktiling, inspired by 
+ * https://siboehm.com/articles/22/CUDA-MMM.
+ * This can still be optimized by using vectorized loads/stores
+ * as well as avoiding bank conflicts.
  */
 template <bool add_to_output = false>
 __device__ void matrix_multiply(
@@ -134,19 +139,43 @@ __device__ void matrix_multiply(
     int K
 ) {
     int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int lane_id = tid % 32;
     int num_threads = blockDim.x;
-    int num_elts = M * N;
-    for (int i = tid; i < num_elts; i += num_threads) {
-        int m = i / N;
-        int n = i % N;
-        float sum = 0;
-        for (int k = 0; k < K; ++k) {
-            sum += A[m * K + k] * B[k * N + n];
-        }
-        if constexpr (add_to_output) {
-            C[i] += sum;
-        } else {
-            C[i] = sum;
+    constexpr int warp_size = 32;
+    int num_warps = num_threads / warp_size;
+
+    constexpr int T = 4;
+    for (int sr = T * warp_id; sr < M; sr += num_warps * T) {
+        int BA = min(T, M - sr);
+        for (int sc = T * lane_id; sc < N; sc += warp_size * T) {
+            int BB = min(T, N - sc);
+
+            float Areg[T] = {0.0};
+            float Breg[T] = {0.0};
+            float Creg[T*T] = {0.0};
+            for (int k = 0; k < K; k++) {
+                for (int i = 0; i < BA; i++) {
+                    Areg[i] = A[(sr + i) * K + k];
+                }
+                for (int i = 0; i < BB; i++) {
+                    Breg[i] = B[k * N + sc + i];
+                }
+                for (int i = 0; i < BA; i++) {
+                    for (int j = 0; j < BB; j++) {
+                        Creg[i * BB + j] += Areg[i] * Breg[j];
+                    }
+                }
+            }
+            for (int i = 0; i < BA; i++) {
+                for (int j = 0; j < BB; j++) {
+                    if constexpr (add_to_output) {
+                        C[(sr + i) * N + (sc + j)] += Creg[i * BB + j];
+                    } else {
+                        C[(sr + i) * N + (sc + j)] = Creg[i * BB + j];
+                    }
+                }
+            }
         }
     }
 }
