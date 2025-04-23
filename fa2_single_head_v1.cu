@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <cassert>
@@ -363,7 +364,7 @@ void flash_attention_2(const float* Q, const float* K, const float* V, float* O,
     );
 }
 
-int main() {
+int main(int argc, char* argv[]) {
     // Print device properties
     int device_id = 0;
     cudaDeviceProp device_prop;
@@ -428,12 +429,30 @@ int main() {
     // Copy result from device to host
     cudaMemcpy(O, d_O, M * d * sizeof(float), cudaMemcpyDeviceToHost);
 
-    // Print first 10 elements of output
-    std::cout << "Output:" << std::endl;
-    for (int i = 0; i < 10 && i < M * d; ++i) {
-        std::cout << std::setprecision(10) << O[i] << " ";
+    // Print or write output
+    if (argc > 1) {
+        std::ofstream outfile(argv[1]);
+        if (outfile.is_open()) {
+            for (int i = 0; i < M * d; ++i) {
+                outfile << std::setprecision(10) << O[i];
+                if ((i + 1) % d == 0) {
+                    outfile << "\n";
+                } else {
+                    outfile << " ";
+                }
+            }
+            outfile.close();
+            std::cout << "Output written to " << argv[1] << std::endl;
+        } else {
+            std::cerr << "Failed to open file: " << argv[1] << std::endl;
+        }
+    } else {
+        std::cout << "Output:" << std::endl;
+        for (int i = 0; i < 10 && i < M * d; ++i) {
+            std::cout << std::setprecision(10) << O[i] << " ";
+        }
+        std::cout << "..." << std::endl;
     }
-    std::cout << "..." << std::endl;
 
     // Free allocated memory
     cudaFree(d_Q);
