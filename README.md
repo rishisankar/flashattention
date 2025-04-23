@@ -4,7 +4,10 @@ Implementations of [Flash Attention 2](https://arxiv.org/abs/2307.08691) in CUDA
 
 ### Worklog (optimizing with Nsight Compute)
 
-Single head attention (using M = 10000, N = 9000, d = 32)
+Single head attention (using M = 10000, N = 9000, d = 32).
+
+A naive Pytorch implementation of `softmax(Q * K.T / sqrt(d)) * V` (doing each of these operations in series) takes roughly 110ms - this CUDA implementation is much better (>90% faster).
+
 | Version | Optimization | Code | Duration | Compute Throughput % | Memory Throughput % | Notes |
 | - | - | - | - | - | - | - |
 | V1 | Baseline | [Link](./fa2_single_head_v1.cu) | 2.78s | 0.27% | 1.19% | Estimated speedup 98.75% since only 1 of 80 SMs being used. Compiling with `nvcc -o fa2_single_head_v1 fa2_single_head_v1.cu -lineinfo`.
@@ -23,7 +26,6 @@ Steps for running the correctness test:
 1. Run the cuda program with a filepath argument (ex: `./fa2_single_head_v1.cu result.out`). The output matrix O will be saved in the file.
 2. Run the verify_output script with the filepath (ex: `python3 verify_output.py result.out`)
 
-### TODOs
-- Compare performance to Pytorch / other Flash Attention implementations
-- Implement multi-head attention
+### Future
 - Utilize tensor cores for matrix multiplication
+- Extend to multi-head attention
