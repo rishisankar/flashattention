@@ -65,9 +65,9 @@ __device__ void matrix_block_load(
     int M,
     int N,
     int block_size,
-    int block_idx
+    int block_idx,
+    cooperative_groups::thread_block &block
 ) {
-    cooperative_groups::thread_block block = cooperative_groups::this_thread_block();
     int num_elts = M * N;
     int block_start = block_idx * block_size * N;
     int block_end = block_start + block_size * N;
@@ -366,7 +366,7 @@ __global__ void flash_attention_2_kernel(
 
     int i = blockIdx.x;
     int loopBr = min(Br, M - i * Br);
-    matrix_block_load_async(Qi, Q, M, d, Br, i);
+    matrix_block_load_async(Qi, Q, M, d, Br, i, block);
     array_fill(Oi, 0, loopBr * d);
     array_fill(li, 0, loopBr);
     array_fill(mi_prev, NEGATIVE_INF, loopBr);
@@ -379,7 +379,7 @@ __global__ void flash_attention_2_kernel(
         matrix_multiply(Qi, KiVi, SiPi, loopBr, loopBc, d);
         __syncthreads();
         // once Ki has been used, can load Vi asynchronously
-        matrix_block_load_async(KiVi, V, N, d, Bc, j);
+        matrix_block_load_async(KiVi, V, N, d, Bc, j, block);
         divide_by_scalar(SiPi, sqrtf(d), loopBr * loopBc);
         __syncthreads();
         mi_update(mi_cur, mi_prev, SiPi, loopBr, loopBc);
