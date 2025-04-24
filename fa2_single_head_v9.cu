@@ -191,16 +191,22 @@ __device__ void matrix_multiply(
  * - Assigns mi_cur to max(mi_prev, rowmax(Si)).
  * - Converts Si to Pi, where Pi = exp(Si - mi).
  * - Update li to exp(mi_prev - mi_cur) * li + rowsum(Pi).
+ * - Update Oi to diag(exp(mi_prev - mi_cur)) * Oi + Pi * V.
  * mi_cur / mi_prev / li are vectors of size Br in smem.
- * Si is a matrix of size Br x Bc in smem.
+ * Si/Pi is a matrix of size Br x Bc in smem.
+ * Oi is a matrix of size Br x d in smem.
+ * V is a matrix of size Bc x d in smem.
  */
-__device__ void update_SiPi_mi_li(
+__device__ void update_SiPi_mi_li_Oi(
     float* mi_cur,
     const float* mi_prev,
     float* li,
     float* SiPi,
+    float* Oi,
+    float* VT,
     int Br,
     int Bc,
+    int d,
     float sqrtd
 ) {
     int tid = threadIdx.x;
@@ -229,11 +235,17 @@ __device__ void update_SiPi_mi_li(
         for (int j = THREADS_PER_WARP / 2; j >= 1; j >>= 1) {
             sum += __shfl_xor_sync(FULL_MASK, sum, j);
         }
+        float exp_mi_diff = exp(mi_prev[i] - max_val);
         if (lane_id == 0) {
             mi_cur[i] = max_val;
-            li[i] = exp(mi_prev[i] - max_val) * li[i] + sum;
+            li[i] = exp_mi_diff * li[i] + sum;
+        }
+        for (int j = lane_id; j < d; j += THREADS_PER_WARP) {
+            Oi[i * d + j] *= exp_mi_diff;
         }
     }
+    __syncthreads();
+    matrix_multiply<true>(SiPi, VT, Oi, Br, d, Bc);
 }
 
 /**
@@ -324,10 +336,9 @@ __global__ void flash_attention_2_kernel(
         __syncthreads();
         matrix_multiply(Qi, KiVi, SiPi, loopBr, loopBc, d);
         __syncthreads();
-        update_SiPi_mi_li(mi_cur, mi_prev, li, SiPi, loopBr, loopBc, sqrtf(d));
         matrix_block_load(KiVi, V, N, d, Bc, j);
         __syncthreads();
-        Oi_update(Oi, SiPi, KiVi, mi_prev, mi_cur, loopBr, loopBc, d);
+        update_SiPi_mi_li_Oi(mi_cur, mi_prev, li, SiPi, Oi, KiVi, loopBr, loopBc, d, sqrtf(d));
         __syncthreads();
 
         // swap mi_prev / mi_cur
