@@ -5,7 +5,7 @@ Iterative implementations of [Flash Attention 2](https://arxiv.org/abs/2307.0869
 Testing single head attention (using M = 10000, N = 9000, d = 32). Performance comparisons to Pytorch:
 - Naive Pytorch implementation (doing all operations of `softmax(Q * K.T / sqrt(d)) * V` in series): 150ms
 - `torch.nn.functional.scaled_dot_product_attention`: 127ms
-- Best implementation here: 6.69ms (>90% speedup!)
+- Best implementation here: 6.25ms (>90% speedup!)
 
 ### Worklog (optimizing with Nsight Compute)
 
@@ -19,7 +19,7 @@ Testing single head attention (using M = 10000, N = 9000, d = 32). Performance c
 | V6 | V4 matmul code is correct but is using local memory (slow) because the indexing isn't computable at compile time ([ref](https://forums.developer.nvidia.com/t/nvcc-chooses-to-use-local-memory-while-there-is-a-lot-of-registers-it-can-use/198870)). | [Link](./fa2_single_head_v6.cu) | 6.95ms | 68.04% | 68.04% | Threads per block reduced to 512 to allow for more register space (only 64k per thread block, according to [technical specifications](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#features-and-technical-specifications)). However matmul is much faster so this is worth doing. New compile command: `nvcc -o fa2_single_head_v5 fa2_single_head_v5.cu -lineinfo -Xptxas -v -O3 -maxrregcount 128` to utilize as many registers as possible. Tried various blocktiling sizes (constant T), T=4 has best performance. Adding optimizations from V5 doesn't seem to help anymore - this builds off of V4.
 | V7 | Use `cooperative_groups::memcpy_async` to load HBM to shared memory | [Link](./fa2_single_head_v7.cu) | 7.40ms | 63.93% | 63.93% | Async memory seems to be slower, unsure why.
 | V8 | Use warp reduction techniques in rowmax op of `mi_update` and rowsum op of `li_update` (this also hopefully reduces bank conflicts) | [Link](./fa2_single_head_v8.cu) | 6.69ms | 72.99% | 72.99% | 
-| V9 | Fuse `divide_by_scalar` and `mi_update` operations into single function (saves additional smem load and syncthreads between ops) | [Link](./fa2_single_head_v9.cu) | 6.60ms | 73.59% | 73.59% | 
+| V9 | Fuse `divide_by_scalar`, `mi_update`, `si_to_pi`, and `li_update` operations into single function (saves repeated smem loads and syncthreads between ops) | [Link](./fa2_single_head_v9.cu) | 6.25ms | 75.79% | 75.79% | 
 
 ### Testing
 
