@@ -2,11 +2,12 @@
 
 Implementations of [Flash Attention 2](https://arxiv.org/abs/2307.08691) in CUDA. Tested on a Nvidia A10G GPU on an Amazon EC2 g5.xlarge instance.
 
+Single head attention (using M = 10000, N = 9000, d = 32). Performance comparisons to Pytorch:
+- Naive Pytorch implementation (doing all operations of `softmax(Q * K.T / sqrt(d)) * V` in series): 110ms
+- `torch.nn.functional.scaled_dot_product_attention`: 127ms
+- This implementation: 6.95ms (achieving >90% speedup!)
+
 ### Worklog (optimizing with Nsight Compute)
-
-Single head attention (using M = 10000, N = 9000, d = 32).
-
-A naive Pytorch implementation of `softmax(Q * K.T / sqrt(d)) * V` (doing each of these operations in series) takes roughly 110ms - this CUDA implementation is much better (>90% faster).
 
 | Version | Optimization | Code | Duration | Compute Throughput % | Memory Throughput % | Notes |
 | - | - | - | - | - | - | - |
@@ -27,5 +28,5 @@ Steps for running the correctness test:
 2. Run the verify_output script with the filepath (ex: `python3 verify_output.py result.out`)
 
 ### Future
-- Utilize tensor cores for matrix multiplication
+- Utilize tensor cores for matrix multiplication and switch to fp16
 - Extend to multi-head attention

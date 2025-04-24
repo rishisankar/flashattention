@@ -12,16 +12,6 @@ error_threshold = 1e-5
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def attention(Q, K, V):
-    d = Q.size(-1)  # The dimensionality of the input vectors
-    # Compute Q * K^T
-    scores = torch.matmul(Q, K.T)  # Shape: (M, N)
-    scaled_scores = scores / torch.sqrt(torch.tensor(d, dtype=torch.float32, device=Q.device))
-    attention_weights = F.softmax(scaled_scores, dim=-1)  # Shape: (M, N)
-    output = torch.matmul(attention_weights, V)  # Shape: (M, d)
-    
-    return output
-
 def compute_expected_matrix():
     Q = np.zeros((M, d), dtype=np.float32)
     K = np.zeros((N, d), dtype=np.float32)
@@ -41,7 +31,7 @@ def compute_expected_matrix():
     K = torch.tensor(K).to(device)
     V = torch.tensor(V).to(device)
 
-    O = attention(Q, K, V)
+    O = F.scaled_dot_product_attention(Q, K, V)
 
     return O
 
