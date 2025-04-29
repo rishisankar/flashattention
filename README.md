@@ -2,24 +2,20 @@
 
 Iterative implementations of [Flash Attention 2](https://arxiv.org/abs/2307.08691) in CUDA, optimizing for performance. Tested on a Nvidia A10G GPU on an Amazon EC2 g5.xlarge instance.
 
-Testing single head attention (using M = 10000, N = 9000, d = 32). Performance comparisons to Pytorch:
-- Naive Pytorch implementation (doing all operations of `softmax(Q * K.T / sqrt(d)) * V` in series): 150ms
-- `torch.nn.functional.scaled_dot_product_attention`: 127ms
-- Best implementation here: 6.18ms (>90% speedup!)
-
 ### Worklog (optimizing with Nsight Compute)
 
-| Version | Optimization | Code | Duration | Compute Throughput % | Memory Throughput % | Notes |
-| - | - | - | - | - | - | - |
-| V1 | Baseline | [Link](./fa2_single_head_v1.cu) | 2.78s | 0.27% | 1.19% | Estimated speedup 98.75% since only 1 of 80 SMs being used. Compiling with `nvcc -o fa2_single_head_v1 fa2_single_head_v1.cu -lineinfo`.
-| V2 | Parallelized work over multiple thread blocks | [Link](./fa2_single_head_v2.cu) | 35.74ms | 21.04% | 92.73% | Uncoalesced shared accesses est speedup 86.73%, shared load bank conflicts est speedup 78.20%, L1TEX local store access pattern est speedup 74.97%. Matrix multiplication is primary memory overhead.
-| V3 | Matrix multiplication multiplies (A @ B) instead of (A @ B.T) | [Link](./fa2_single_head_v3.cu) | 9.48ms | 79.28% | 79.28% | L1TEX local store access pattern est speedup 55.43%; Memory I/O causing warp stalls. `matrix_block_load_transpose()` seems to have a big memory overhead.
-| V4 | Faster matrix multiplication using registers based on https://siboehm.com/articles/22/CUDA-MMM | [Link](./fa2_single_head_v4.cu) | 43.98ms | 53.32% | 53.32% | Why is this slower than V3? Seems to be using local memory not registers.
-| V5 | (builds off V3) Add padding to matrix load transpose to reduce smem bank store conflicts | [Link](./fa2_single_head_v5.cu) | 9.45ms | 79.61% | 79.61% | Matrix multiplication needs to be improved. li_update and mi_update also have excessive L1 wavefronts.
-| V6 | V4 matmul code is correct but is using local memory (slow) because the indexing isn't computable at compile time ([ref](https://forums.developer.nvidia.com/t/nvcc-chooses-to-use-local-memory-while-there-is-a-lot-of-registers-it-can-use/198870)). | [Link](./fa2_single_head_v6.cu) | 6.95ms | 68.04% | 68.04% | Threads per block reduced to 512 to allow for more register space (only 64k per thread block, according to [technical specifications](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#features-and-technical-specifications)). However matmul is much faster so this is worth doing. New compile command: `nvcc -o fa2_single_head_v5 fa2_single_head_v5.cu -lineinfo -Xptxas -v -O3 -maxrregcount 128` to utilize as many registers as possible. Tried various blocktiling sizes (constant T), T=4 has best performance. Adding optimizations from V5 doesn't seem to help anymore - this builds off of V4.
-| V7 | Use `cooperative_groups::memcpy_async` to load HBM to shared memory | [Link](./fa2_single_head_v7.cu) | 7.40ms | 63.93% | 63.93% | Async memory seems to be slower, unsure why.
-| V8 | Use warp reduction techniques in rowmax op of `mi_update` and rowsum op of `li_update` (this also hopefully reduces bank conflicts) | [Link](./fa2_single_head_v8.cu) | 6.69ms | 72.99% | 72.99% | 
-| V9 | Fuse `divide_by_scalar`, `mi_update`, `si_to_pi`, and `li_update` operations into single function (saves repeated smem loads and syncthreads between ops) | [Link](./fa2_single_head_v9.cu) | 6.18ms | 76.38% | 76.38% | 
+| Version | Optimization | Code | Duration | Cycles | Compute Throughput % | Memory Throughput % | Notes |
+| - | - | - | - | - | - | - | - |
+| V1 | Baseline | [Link](./flash_attention2_v1.cu) | 2.08s | 2,741,237,357 | 0.27% | 1.19% | Estimated speedup 98.75% since only 1 of 80 SMs being used. Compiling with `nvcc -o flash_attention2_v1 flash_attention2_v1.cu -lineinfo`.
+| V2 | Parallelized work over multiple thread blocks | [Link](./flash_attention2_v2.cu) | 32.52ms | 42,890,564 | 17.25% | 76.00% | Uncoalesced shared accesses est speedup 86.73%, shared load bank conflicts est speedup 78.20%, L1TEX local store access pattern est speedup 74.97%. Matrix multiplication is primary memory overhead.
+| V3 | Matrix multiplication multiplies (A @ B) instead of (A @ B.T) | [Link](./flash_attention2_v3.cu) | 8.64ms | 11,394,958 | 64.93% | 64.93% | L1TEX local store access pattern est speedup 55.43%; Memory I/O causing warp stalls. `matrix_block_load_transpose()` seems to have a big memory overhead.
+| V4 | Faster matrix multiplication using registers based on https://siboehm.com/articles/22/CUDA-MMM | [Link](./flash_attention2_v4.cu) | 38.32ms | 50,579,102 | 45.72% | 45.72% | Why is this slower than V3? Seems to be using local memory not registers.
+| V5 | (builds off V3) Add padding to matrix load transpose to attempt to reduce smem bank store conflicts | [Link](./flash_attention2_v5.cu) | 8.65ms | 11,411,135 | 64.84% | 64.84% | Matrix multiplication needs to be improved. li_update and mi_update also have excessive L1 wavefronts. Padding doesn't seem to have done much...
+| V6 | V4 matmul code is correct but is using local memory (slow) because the indexing isn't computable at compile time ([ref](https://forums.developer.nvidia.com/t/nvcc-chooses-to-use-local-memory-while-there-is-a-lot-of-registers-it-can-use/198870)). | [Link](./flash_attention2_v6.cu) | 6.32ms | 8,342,705 | 55.81% | 55.81% | Threads per block reduced to 512 to allow for more register space (only 64k per thread block, according to [technical specifications](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#features-and-technical-specifications)). However matmul is much faster so this is worth doing. New compile command: `nvcc -o flash_attention2_v6 flash_attention2_v6.cu -lineinfo -Xptxas -v -O3 -maxrregcount 128` to utilize as many registers as possible. Tried various blocktiling sizes (constant T), T=4 has best performance. This builds off V4, padding didn't do much.
+| V7 | Use `cooperative_groups::memcpy_async` to load HBM to shared memory | [Link](./flash_attention2_v7.cu) | 6.69ms | 8,833,354 | 52.65% | 52.65% | Async memory seems to be slower, maybe not enough time between operations to reap benefits... could try double buffering in matrix multiply to get async memory load benefits.
+| V8 | Use warp reduction techniques in rowmax op of `mi_update` and rowsum op of `li_update` (this also hopefully reduces bank conflicts) | [Link](./flash_attention2_v8.cu) | 6.08ms | 8,105,621 | 59.97% | 59.97% | 
+| V9 | Fuse `divide_by_scalar`, `mi_update`, `si_to_pi`, and `li_update` operations into single function (saves repeated smem loads and syncthreads between ops) | [Link](./flash_attention2_v9.cu) | 5.61ms | 7,400,516 | 62.72% | 62.72% |
+| V10 | Remove bound checking / last block logic - assume the parameters used are N=M=8192, d=32 | [Link](./flash_attention2_v9.cu) | 5.53ms | 7,291,137 | 63.53% | 63.53% |
 
 ### Testing
 
@@ -27,7 +23,7 @@ The python script `verify_output.py` computes the attention operation on the sam
 
 Steps for running the correctness test:
 1. Compile the cuda program.
-1. Run the cuda program with a filepath argument (ex: `./fa2_single_head_v1.cu result.out`). The output matrix O will be saved in the file.
+1. Run the cuda program with a filepath argument (ex: `./flash_attention2_v1.cu result.out`). The output matrix O will be saved in the file.
 2. Run the verify_output script with the filepath (ex: `python3 verify_output.py result.out`)
 
 ### Future

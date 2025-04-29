@@ -1,10 +1,13 @@
 #include <iostream>
 #include <fstream>
+#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <cassert>
 
 #include <cuda_runtime.h>
+#include <cooperative_groups.h>
+#include <cooperative_groups/memcpy_async.h>
 
 /*
 Implementation of Flash Attention 2
@@ -49,6 +52,27 @@ __device__ void matrix_block_load(
     for (int i = block_start + tid; i < block_end; i += num_threads) {
         dst[i - block_start] = (i < num_elts) ? src[i] : 0;
     }
+}
+
+/**
+ * Load a block of the matrix from src to dst.
+ * src intended to be global, dst intended to be shared memory.
+ * Matrix is size MxN
+ */
+ __device__ void matrix_block_load_async(
+    float* dst, 
+    const float* src, 
+    int M,
+    int N,
+    int block_size,
+    int block_idx,
+    cooperative_groups::thread_block &block
+) {
+    int num_elts = M * N;
+    int block_start = block_idx * block_size * N;
+    int block_end = block_start + block_size * N;
+    int num_to_copy = min(block_end - block_start, num_elts - block_start);
+    cooperative_groups::memcpy_async(block, dst, src + block_start, num_to_copy * sizeof(float));
 }
 
 /**
@@ -119,11 +143,16 @@ __device__ void array_fill(
 }
 
 /**
- * Computes matrix multiplication A*BT.
- * A is of size MxK, B is of size NxK.
+ * Computes matrix multiplication A*B.
+ * A is of size MxK, B is of size KxN.
  * Output C is of size MxN.
- * If add_to_output, A*BT is added to C instead of overwriting it.
- * This is a simple version, not optimized for speed.
+ * If add_to_output, A*B is added to C instead of overwriting it.
+ * A, B, C are in shared memory. This assumes a single
+ * block of 1024 threads, and 32 threads per warp.
+ * Implements 2d blocktiling, inspired by 
+ * https://siboehm.com/articles/22/CUDA-MMM.
+ * This can still be optimized by using vectorized loads/stores
+ * as well as avoiding bank conflicts.
  */
 template <bool add_to_output = false>
 __device__ void matrix_multiply(
@@ -135,19 +164,43 @@ __device__ void matrix_multiply(
     int K
 ) {
     int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int lane_id = tid % 32;
     int num_threads = blockDim.x;
-    int num_elts = M * N;
-    for (int i = tid; i < num_elts; i += num_threads) {
-        int m = i / N;
-        int n = i % N;
-        float sum = 0;
-        for (int k = 0; k < K; ++k) {
-            sum += A[m * K + k] * B[n * K + k];
-        }
-        if constexpr (add_to_output) {
-            C[i] += sum;
-        } else {
-            C[i] = sum;
+    constexpr int warp_size = 32;
+    int num_warps = num_threads / warp_size;
+
+    constexpr int T = 4;
+    for (int sr = T * warp_id; sr < M; sr += num_warps * T) {
+        int BA = min(T, M - sr);
+        for (int sc = T * lane_id; sc < N; sc += warp_size * T) {
+            int BB = min(T, N - sc);
+
+            float Areg[T] = {0.0};
+            float Breg[T] = {0.0};
+            float Creg[T*T] = {0.0};
+            for (int k = 0; k < K; k++) {
+                for (int i = 0; i < T; i++) {
+                    Areg[i] = A[(sr + i) * K + k];
+                }
+                for (int i = 0; i < T; i++) {
+                    Breg[i] = B[k * N + sc + i];
+                }
+                for (int i = 0; i < T; i++) {
+                    for (int j = 0; j < T; j++) {
+                        Creg[i * T + j] += Areg[i] * Breg[j];
+                    }
+                }
+            }
+            for (int i = 0; i < BA; i++) {
+                for (int j = 0; j < BB; j++) {
+                    if constexpr (add_to_output) {
+                        C[(sr + i) * N + (sc + j)] += Creg[i * T + j];
+                    } else {
+                        C[(sr + i) * N + (sc + j)] = Creg[i * T + j];
+                    }
+                }
+            }
         }
     }
 }
@@ -295,6 +348,9 @@ __global__ void flash_attention_2_kernel(
     const int alloc_size
 ) {
     extern __shared__ float s[];
+
+    cooperative_groups::thread_block block = cooperative_groups::this_thread_block();
+
     float *Oi = s;
     float *Qi = &s[alloc_size];
     // will first store Ki, then get overriden to ViT
@@ -310,17 +366,20 @@ __global__ void flash_attention_2_kernel(
 
     int i = blockIdx.x;
     int loopBr = min(Br, M - i * Br);
-    matrix_block_load(Qi, Q, M, d, Br, i);
+    matrix_block_load_async(Qi, Q, M, d, Br, i, block);
     array_fill(Oi, 0, loopBr * d);
     array_fill(li, 0, loopBr);
     array_fill(mi_prev, NEGATIVE_INF, loopBr);
     __syncthreads();
+    block.sync();
     for (int j = 0; j < Tc; j++) {
         int loopBc = min(Bc, N - j * Bc);
-        matrix_block_load(KiVi, K, N, d, Bc, j);
+        matrix_block_load_transpose(KiVi, K, N, d, Bc, loopBc, j);
         __syncthreads();
         matrix_multiply(Qi, KiVi, SiPi, loopBr, loopBc, d);
         __syncthreads();
+        // once Ki has been used, can load Vi asynchronously
+        matrix_block_load_async(KiVi, V, N, d, Bc, j, block);
         divide_by_scalar(SiPi, sqrtf(d), loopBr * loopBc);
         __syncthreads();
         mi_update(mi_cur, mi_prev, SiPi, loopBr, loopBc);
@@ -328,8 +387,7 @@ __global__ void flash_attention_2_kernel(
         si_to_pi(SiPi, mi_cur, loopBr, loopBc);
         __syncthreads();
         li_update(li, SiPi, mi_prev, mi_cur, loopBr, loopBc);
-        matrix_block_load_transpose(KiVi, V, N, d, Bc, loopBc, j);
-        __syncthreads();
+        block.sync(); // make sure Vi is loaded
         Oi_update(Oi, SiPi, KiVi, mi_prev, mi_cur, loopBr, loopBc, d);
         __syncthreads();
 
@@ -354,7 +412,7 @@ void flash_attention_2(const float* Q, const float* K, const float* V, float* O,
     int shmem_needed = (4 * alloc_size + 3 * Br) * sizeof(float);
 
     // call kernel
-    const int threadsPerBlock = 1024;
+    const int threadsPerBlock = 512;
     const int blocksPerGrid = Tr;
     std::cout << "Shared memory needed: " << shmem_needed << " bytes" << std::endl;
     flash_attention_2_kernel<<<blocksPerGrid, threadsPerBlock, shmem_needed>>>(
@@ -385,8 +443,8 @@ int main(int argc, char* argv[]) {
     cudaFuncSetAttribute(flash_attention_2_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, A10G_SRAM_SIZE);
 
     // Benchmark parameters
-    constexpr int M = 10000;
-    constexpr int N = 9000;
+    constexpr int M = 8192;
+    constexpr int N = 8192;
     constexpr int d = 32;
 
     std::cout << "M: " << M << ", N: " << N << ", d: " << d << std::endl;

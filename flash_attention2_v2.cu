@@ -119,10 +119,10 @@ __device__ void array_fill(
 }
 
 /**
- * Computes matrix multiplication A * B.
- * A is of size MxK, B is of size KxN.
+ * Computes matrix multiplication A*BT.
+ * A is of size MxK, B is of size NxK.
  * Output C is of size MxN.
- * If add_to_output, A * B is added to C instead of overwriting it.
+ * If add_to_output, A*BT is added to C instead of overwriting it.
  * This is a simple version, not optimized for speed.
  */
 template <bool add_to_output = false>
@@ -142,7 +142,7 @@ __device__ void matrix_multiply(
         int n = i % N;
         float sum = 0;
         for (int k = 0; k < K; ++k) {
-            sum += A[m * K + k] * B[k * N + n];
+            sum += A[m * K + k] * B[n * K + k];
         }
         if constexpr (add_to_output) {
             C[i] += sum;
@@ -317,7 +317,7 @@ __global__ void flash_attention_2_kernel(
     __syncthreads();
     for (int j = 0; j < Tc; j++) {
         int loopBc = min(Bc, N - j * Bc);
-        matrix_block_load_transpose(KiVi, K, N, d, Bc, loopBc, j);
+        matrix_block_load(KiVi, K, N, d, Bc, j);
         __syncthreads();
         matrix_multiply(Qi, KiVi, SiPi, loopBr, loopBc, d);
         __syncthreads();
@@ -328,7 +328,7 @@ __global__ void flash_attention_2_kernel(
         si_to_pi(SiPi, mi_cur, loopBr, loopBc);
         __syncthreads();
         li_update(li, SiPi, mi_prev, mi_cur, loopBr, loopBc);
-        matrix_block_load(KiVi, V, N, d, Bc, j);
+        matrix_block_load_transpose(KiVi, V, N, d, Bc, loopBc, j);
         __syncthreads();
         Oi_update(Oi, SiPi, KiVi, mi_prev, mi_cur, loopBr, loopBc, d);
         __syncthreads();
@@ -385,8 +385,8 @@ int main(int argc, char* argv[]) {
     cudaFuncSetAttribute(flash_attention_2_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, A10G_SRAM_SIZE);
 
     // Benchmark parameters
-    constexpr int M = 10000;
-    constexpr int N = 9000;
+    constexpr int M = 8192;
+    constexpr int N = 8192;
     constexpr int d = 32;
 
     std::cout << "M: " << M << ", N: " << N << ", d: " << d << std::endl;

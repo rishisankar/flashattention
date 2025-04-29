@@ -4,8 +4,8 @@ import numpy as np
 import sys
 
 # Hardcoded benchmark parameters
-M = 10000
-N = 9000
+M = 8192
+N = 8192
 d = 32
 
 error_threshold = 1e-5
@@ -13,27 +13,16 @@ error_threshold = 1e-5
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def compute_expected_matrix():
-    Q = np.zeros((M, d), dtype=np.float32)
-    K = np.zeros((N, d), dtype=np.float32)
-    V = np.zeros((N, d), dtype=np.float32)
-
-    # Fill Q, K, V matrices with the same logic
-    # used by the cuda main functions
-    for i in range(M * d):
-        Q.flat[i] = float(i) / (M * d)
-
-    for i in range(N * d):
-        K.flat[i] = float(i) * 2 / (N * d)
-        V.flat[i] = float(i) * 3 / (N * d)
-
-    # Convert to PyTorch tensors
-    Q = torch.tensor(Q).to(device)
-    K = torch.tensor(K).to(device)
-    V = torch.tensor(V).to(device)
+    Q = torch.arange(M * d, dtype=torch.float32, device=device).reshape(M, d) / (M * d)
+    K = torch.arange(N * d, dtype=torch.float32, device=device).reshape(N, d) * 2 / (N * d)
+    V = torch.arange(N * d, dtype=torch.float32, device=device).reshape(N, d) * 3 / (N * d)
+    Q = Q.unsqueeze(0).unsqueeze(0)  # (1, 1, M, d)
+    K = K.unsqueeze(0).unsqueeze(0)  # (1, 1, N, d)
+    V = V.unsqueeze(0).unsqueeze(0)  # (1, 1, N, d)
 
     O = F.scaled_dot_product_attention(Q, K, V)
 
-    return O
+    return O.reshape(M, d)
 
 def main(filepath):
     with open(filepath, 'r') as f:

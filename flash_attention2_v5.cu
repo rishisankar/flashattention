@@ -389,8 +389,8 @@ int main(int argc, char* argv[]) {
     cudaFuncSetAttribute(flash_attention_2_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, A10G_SRAM_SIZE);
 
     // Benchmark parameters
-    constexpr int M = 10000;
-    constexpr int N = 9000;
+    constexpr int M = 8192;
+    constexpr int N = 8192;
     constexpr int d = 32;
 
     std::cout << "M: " << M << ", N: " << N << ", d: " << d << std::endl;
